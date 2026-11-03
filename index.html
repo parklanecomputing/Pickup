@@ -1,0 +1,401 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#1d2a1f">
+<title>Picking-up photo test</title>
+<style>
+:root{--bg:#121812;--panel:#1d2a1f;--fg:#eef2ea;--muted:#9fb09a;--accent:#e8b23a;--line:#ff5a3c;--mark:#3cf0ff;--edge:#3e5640}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font:16px/1.35 system-ui,sans-serif;overflow:hidden;-webkit-user-select:none;user-select:none}
+button{font:inherit;color:var(--fg);background:#2d3f2f;border:1px solid var(--edge);border-radius:10px;padding:8px 10px;min-height:48px}
+button.primary{background:var(--accent);color:#1a1a1a;border:0;font-weight:700}
+button.on{outline:3px solid var(--accent);outline-offset:-3px}
+button:disabled{opacity:.4}
+.screen{position:fixed;inset:0;display:none}
+.screen.show{display:flex}
+#start{flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:24px;text-align:center;overflow:auto}
+#start p{max-width:560px;color:var(--muted);margin:0}
+.stage{flex:1;position:relative;min-width:0;background:#000}
+video,#cv{position:absolute;inset:0;width:100%;height:100%}
+video{object-fit:contain}
+#cv{touch-action:none}
+.strip{width:156px;flex:none;display:flex;flex-direction:column;gap:6px;padding:8px;background:var(--panel);overflow-y:auto}
+.readout{font:12px/1.35 ui-monospace,Menlo,monospace;color:var(--muted);white-space:pre-line}
+.big{font-size:22px;font-weight:700;color:var(--fg);text-align:center}
+.warn{color:var(--accent)}
+#sheet{position:fixed;inset:0;background:rgba(0,0,0,.65);display:none;align-items:center;justify-content:center;z-index:5}
+#sheet.show{display:flex}
+.card{background:var(--panel);border-radius:14px;padding:14px;width:min(820px,96vw);max-height:94vh;overflow:auto;-webkit-user-select:text;user-select:text}
+.card h2{margin:0 0 8px;font-size:18px}
+table{border-collapse:collapse;font-size:13px;width:100%}
+td,th{padding:4px 6px;border-bottom:1px solid var(--edge);text-align:right;white-space:nowrap}
+th{color:var(--muted);font-weight:600}
+td:first-child,th:first-child{text-align:left}
+label{display:block;margin:10px 0 2px;color:var(--muted);font-size:14px}
+input{font:inherit;width:100%;padding:8px;border-radius:8px;border:1px solid var(--edge);background:#0e130e;color:var(--fg)}
+.row{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+.note{color:var(--muted);font-size:13px;margin:8px 0 0}
+</style>
+</head>
+<body>
+
+<section id="start" class="screen show">
+  <h1 style="margin:0">Picking-up photo test</h1>
+  <p>Take a photo from where you stand, draw the guns' line, tap things you can see, then walk to each one and press "I'm here". The results show how far off each tap was.</p>
+  <p>Hold the phone in landscape. Allow camera, location and motion when asked.</p>
+  <button id="btnStart" class="primary" style="min-width:220px">Start</button>
+  <p id="startMsg" class="warn"></p>
+</section>
+
+<section id="cam" class="screen">
+  <div class="stage"><video id="video" playsinline muted autoplay></video></div>
+  <div class="strip">
+    <div id="camRead" class="readout"></div>
+    <button id="btnShoot" class="primary" style="min-height:72px">Take photo</button>
+    <button id="btnBackToPhoto">Back to photo</button>
+    <p class="note">Keep the phone level and still for a second before taking the photo.</p>
+  </div>
+</section>
+
+<section id="photo" class="screen">
+  <div class="stage"><canvas id="cv"></canvas></div>
+  <div class="strip">
+    <div id="count" class="big">0 marked</div>
+    <button id="btnMark" class="on">Mark birds</button>
+    <button id="btnLine">Draw guns' line</button>
+    <button id="btnUndo">Undo</button>
+    <button id="btnResults" class="primary">Results / I'm here</button>
+    <button id="btnSettings">Settings</button>
+    <button id="btnNew">New photo</button>
+    <div id="photoRead" class="readout"></div>
+  </div>
+</section>
+
+<div id="sheet"><div class="card" id="sheetBody"></div></div>
+
+<script>
+'use strict';
+const D = Math.PI / 180, YD = 0.9144;
+const $ = id => document.getElementById(id);
+const norm = a => ((a % 360) + 360) % 360;
+const angDiff = (a, b) => { let x = norm(a - b); return x > 180 ? x - 360 : x; };
+const f1 = v => (v == null || !isFinite(v)) ? '–' : v.toFixed(1);
+const f0 = v => (v == null || !isFinite(v)) ? '–' : Math.round(v).toString();
+
+// ---------- state ----------
+const KEY = 'pickup-photo-test-v1';
+let S = { settings: { fov: 70, height: 1.5, lineYds: null }, photo: null, line: [], targets: [] };
+try { const raw = localStorage.getItem(KEY); if (raw) S = Object.assign(S, JSON.parse(raw)); } catch (e) {}
+function save() { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) {} }
+let mode = 'mark';
+
+// ---------- sensors ----------
+const sens = { heading: null, pitch: null, roll: null, buf: [], absolute: false, src: 'none' };
+function screenAngle() {
+  if (screen.orientation && typeof screen.orientation.angle === 'number') return screen.orientation.angle;
+  return typeof window.orientation === 'number' ? (window.orientation + 360) % 360 : 0;
+}
+function onOrientation(e, alphaOverride) {
+  const alpha = alphaOverride != null ? alphaOverride : e.alpha;
+  if (alpha == null || e.beta == null || e.gamma == null) return;
+  const a = alpha * D, b = e.beta * D, g = e.gamma * D;
+  // Direction the back camera points (device -Z) in East/North/Up.
+  const E = -(Math.sin(g) * Math.cos(a) + Math.cos(g) * Math.sin(b) * Math.sin(a));
+  const N = -(Math.sin(g) * Math.sin(a) - Math.cos(g) * Math.sin(b) * Math.cos(a));
+  const U = -Math.cos(g) * Math.cos(b);
+  const heading = norm(Math.atan2(E, N) / D);
+  const pitch = Math.asin(Math.max(-1, Math.min(1, U))) / D;
+  // Roll: how far the screen's right edge is raised.
+  const ang = screenAngle();
+  const ux = -Math.sin(g) * Math.cos(b), uy = Math.sin(b);
+  const rightU = ang === 90 ? -uy : ang === 180 ? -ux : ang === 270 ? uy : ux;
+  const roll = Math.asin(Math.max(-1, Math.min(1, rightU))) / D;
+  sens.heading = heading; sens.pitch = pitch; sens.roll = roll;
+  const now = performance.now();
+  sens.buf.push({ t: now, hx: Math.sin(heading * D), hy: Math.cos(heading * D), pitch, roll });
+  while (sens.buf.length && now - sens.buf[0].t > 1500) sens.buf.shift();
+}
+window.addEventListener('deviceorientationabsolute', e => { sens.absolute = true; sens.src = 'absolute'; onOrientation(e); }, true);
+window.addEventListener('deviceorientation', e => {
+  if (sens.absolute) return;
+  if (e.webkitCompassHeading != null) { sens.src = 'iOS compass'; onOrientation(e, 360 - e.webkitCompassHeading); }
+  else if (e.absolute) { sens.src = 'absolute'; onOrientation(e); }
+  else { sens.src = 'relative (no compass!)'; onOrientation(e); }
+}, true);
+function steadyOrientation() {
+  const b = sens.buf; if (!b.length) return null;
+  let hx = 0, hy = 0, p = 0, r = 0;
+  for (const s of b) { hx += s.hx; hy += s.hy; p += s.pitch; r += s.roll; }
+  const heading = norm(Math.atan2(hx, hy) / D);
+  let spread = 0; for (const s of b) spread = Math.max(spread, Math.abs(angDiff(Math.atan2(s.hx, s.hy) / D, heading)));
+  return { heading, pitch: p / b.length, roll: r / b.length, spread };
+}
+
+const gps = { fixes: [], last: null, err: null };
+function startGps() {
+  if (!navigator.geolocation) { gps.err = 'No GPS in this browser'; return; }
+  navigator.geolocation.watchPosition(p => {
+    const f = { lat: p.coords.latitude, lon: p.coords.longitude, acc: p.coords.accuracy, t: Date.now() };
+    gps.last = f; gps.fixes.push(f);
+    while (gps.fixes.length && Date.now() - gps.fixes[0].t > 20000) gps.fixes.shift();
+  }, e => { gps.err = e.message; }, { enableHighAccuracy: true, maximumAge: 0, timeout: 30000 });
+}
+// Weighted mean of recent fixes (better fixes count more).
+function meanFix(sinceMs) {
+  const fs = gps.fixes.filter(f => Date.now() - f.t <= sinceMs);
+  if (!fs.length) return gps.last;
+  let w = 0, la = 0, lo = 0, best = Infinity;
+  for (const f of fs) { const k = 1 / Math.max(1, f.acc) ** 2; w += k; la += f.lat * k; lo += f.lon * k; best = Math.min(best, f.acc); }
+  return { lat: la / w, lon: lo / w, acc: best, n: fs.length };
+}
+function rel(a, b) {
+  const R = 6371000;
+  const x = (b.lon - a.lon) * D * Math.cos((a.lat + b.lat) / 2 * D) * R;
+  const y = (b.lat - a.lat) * D * R;
+  return { x, y, dist: Math.hypot(x, y), bearing: norm(Math.atan2(x, y) / D) };
+}
+
+// ---------- camera ----------
+let stream = null;
+async function startCamera() {
+  if (stream) return;
+  stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } } });
+  $('video').srcObject = stream;
+}
+function stopCamera() { if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; } }
+
+let wakeLock = null;
+async function keepAwake() { try { wakeLock = await navigator.wakeLock.request('screen'); } catch (e) {} }
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') keepAwake(); });
+
+// ---------- screens ----------
+function show(id) { for (const s of document.querySelectorAll('.screen')) s.classList.toggle('show', s.id === id); if (id === 'photo') draw(); }
+
+$('btnStart').onclick = async () => {
+  $('startMsg').textContent = '';
+  try {
+    if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+      const r = await DeviceOrientationEvent.requestPermission(); if (r !== 'granted') throw new Error('Motion permission was refused');
+    }
+    startGps(); keepAwake();
+    try { await document.documentElement.requestFullscreen(); await screen.orientation.lock('landscape'); } catch (e) {}
+    if (S.photo) { show('photo'); } else { await startCamera(); show('cam'); }
+  } catch (e) { $('startMsg').textContent = 'Could not start: ' + e.message; }
+};
+$('btnBackToPhoto').onclick = () => { stopCamera(); show('photo'); };
+$('btnNew').onclick = async () => {
+  if (S.targets.length && !confirm('Start a new photo? This clears the current marks and results.')) return;
+  try { await startCamera(); show('cam'); } catch (e) { alert('Camera error: ' + e.message); }
+};
+
+setInterval(() => {
+  if (!$('cam').classList.contains('show')) return;
+  const o = steadyOrientation(), g = gps.last;
+  const lines = [];
+  lines.push('Heading ' + (o ? f0(o.heading) + '°' : '–'));
+  lines.push('Pitch ' + (o ? f1(o.pitch) + '°' : '–'));
+  lines.push('Roll ' + (o ? f1(o.roll) + '°' : '–'));
+  lines.push('Wobble ±' + (o ? f1(o.spread) + '°' : '–'));
+  lines.push('GPS ' + (g ? '±' + f0(g.acc) + ' m' : (gps.err || 'waiting')));
+  lines.push('Compass: ' + sens.src);
+  $('camRead').textContent = lines.join('\n');
+  $('btnBackToPhoto').disabled = !S.photo;
+  $('btnShoot').disabled = !o || !g;
+}, 250);
+
+$('btnShoot').onclick = () => {
+  const v = $('video'); const o = steadyOrientation(); const fix = meanFix(10000);
+  if (!v.videoWidth || !o || !fix) return;
+  const maxW = 1600, k = Math.min(1, maxW / v.videoWidth);
+  const c = document.createElement('canvas'); c.width = Math.round(v.videoWidth * k); c.height = Math.round(v.videoHeight * k);
+  c.getContext('2d').drawImage(v, 0, 0, c.width, c.height);
+  S.photo = { dataUrl: c.toDataURL('image/jpeg', 0.82), w: c.width, h: c.height, lat: fix.lat, lon: fix.lon, acc: fix.acc,
+    heading: o.heading, pitch: o.pitch, roll: o.roll, wobble: o.spread, compass: sens.src, time: new Date().toISOString() };
+  S.line = []; S.targets = []; save(); stopCamera(); loadImg(); setMode('line'); show('photo');
+};
+
+// ---------- geometry ----------
+function focalPx() { return (S.photo.w / 2) / Math.tan(S.settings.fov * D / 2); }
+function angles(px, py) {
+  const f = focalPx();
+  return { right: Math.atan((px - S.photo.w / 2) / f) / D, down: Math.atan((py - S.photo.h / 2) / f) / D };
+}
+function lineYAt(px) {
+  const [a, b] = S.line; if (Math.abs(b.x - a.x) < 1) return (a.y + b.y) / 2;
+  return a.y + (b.y - a.y) * (px - a.x) / (b.x - a.x);
+}
+function distFromDep(dep) { return dep > 0.02 ? S.settings.height / Math.tan(dep * D) : Infinity; }
+function estimate(t) {
+  const { right, down } = angles(t.x, t.y);
+  const bearing = norm(S.photo.heading + right);
+  const dep = down - S.photo.pitch;               // degrees below level
+  const sensorDist = distFromDep(dep);
+  let lineDist = null;
+  if (S.line.length === 2 && S.settings.lineYds > 0) {
+    const ly = angles(t.x, lineYAt(t.x)).down - S.photo.pitch;
+    const trueLy = Math.atan(S.settings.height / (S.settings.lineYds * YD)) / D;
+    lineDist = distFromDep(dep + (trueLy - ly));
+  }
+  return { bearing, sensorDist, lineDist, best: lineDist != null ? lineDist : sensorDist };
+}
+function horizonY() { return S.photo.h / 2 + focalPx() * Math.tan(S.photo.pitch * D); }
+
+// ---------- photo canvas ----------
+const cv = $('cv'), ctx = cv.getContext('2d'); let img = null, view = { s: 1, ox: 0, oy: 0 };
+function loadImg() { if (!S.photo) return; img = new Image(); img.onload = draw; img.src = S.photo.dataUrl; }
+function draw() {
+  const r = cv.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+  cv.width = Math.round(r.width * dpr); cv.height = Math.round(r.height * dpr);
+  ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.fillStyle = '#000'; ctx.fillRect(0, 0, cv.width, cv.height);
+  updateStrip();
+  if (!S.photo || !img || !img.complete) return;
+  const s = Math.min(cv.width / S.photo.w, cv.height / S.photo.h);
+  view = { s, ox: (cv.width - S.photo.w * s) / 2, oy: (cv.height - S.photo.h * s) / 2, dpr };
+  ctx.drawImage(img, view.ox, view.oy, S.photo.w * s, S.photo.h * s);
+  ctx.setTransform(s, 0, 0, s, view.ox, view.oy);
+  const lw = 2 * dpr / s;
+  // sensor horizon
+  const hy = horizonY();
+  if (hy > 0 && hy < S.photo.h) { ctx.setLineDash([12 * dpr / s, 8 * dpr / s]); ctx.strokeStyle = 'rgba(255,255,255,.7)'; ctx.lineWidth = lw; ctx.beginPath(); ctx.moveTo(0, hy); ctx.lineTo(S.photo.w, hy); ctx.stroke(); ctx.setLineDash([]); }
+  // guns' line
+  ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--line'); ctx.fillStyle = ctx.strokeStyle; ctx.lineWidth = lw * 1.5;
+  if (S.line.length === 2) { ctx.beginPath(); ctx.moveTo(0, lineYAt(0)); ctx.lineTo(S.photo.w, lineYAt(S.photo.w)); ctx.stroke(); }
+  for (const p of S.line) { ctx.beginPath(); ctx.arc(p.x, p.y, 7 * dpr / s, 0, 7); ctx.fill(); }
+  // targets
+  const fs = 15 * dpr / s; ctx.font = `700 ${fs}px system-ui,sans-serif`; ctx.textBaseline = 'middle';
+  S.targets.forEach((t, i) => {
+    ctx.strokeStyle = '#3cf0ff'; ctx.lineWidth = lw * 1.5;
+    ctx.beginPath(); ctx.arc(t.x, t.y, 12 * dpr / s, 0, 7); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(t.x - 4 * dpr / s, t.y); ctx.lineTo(t.x + 4 * dpr / s, t.y); ctx.moveTo(t.x, t.y - 4 * dpr / s); ctx.lineTo(t.x, t.y + 4 * dpr / s); ctx.stroke();
+    const e = estimate(t); const label = `${i + 1}  ${isFinite(e.best) ? f0(e.best / YD) + ' yd' : 'above level'}`;
+    const tx = t.x + 16 * dpr / s, w = ctx.measureText(label).width;
+    ctx.fillStyle = 'rgba(0,0,0,.6)'; ctx.fillRect(tx - 3 * dpr / s, t.y - fs * 0.7, w + 6 * dpr / s, fs * 1.4);
+    ctx.fillStyle = t.truth ? '#7bd66b' : '#fff'; ctx.fillText(label, tx, t.y);
+  });
+}
+function updateStrip() {
+  $('count').textContent = `${S.targets.length} marked`;
+  const p = S.photo; if (!p) { $('photoRead').textContent = ''; return; }
+  const warn = [];
+  if (Math.abs(p.roll) > 4) warn.push('Phone was tilted ' + f1(p.roll) + '° sideways; distances less reliable.');
+  if (p.wobble > 5) warn.push('Compass wobbling ±' + f1(p.wobble) + '°.');
+  if (S.line.length === 2 && !(S.settings.lineYds > 0)) warn.push("Set the guns' line distance in Settings.");
+  $('photoRead').textContent = `Heading ${f0(p.heading)}°\nPitch ${f1(p.pitch)}°\nGPS ±${f0(p.acc)} m\nFOV ${S.settings.fov}°\n` + (warn.length ? '\n' + warn.join('\n') : '');
+}
+window.addEventListener('resize', () => { if ($('photo').classList.contains('show')) setTimeout(draw, 50); });
+
+function toImg(ev) {
+  const r = cv.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+  return { x: ((ev.clientX - r.left) * dpr - view.ox) / view.s, y: ((ev.clientY - r.top) * dpr - view.oy) / view.s };
+}
+let drag = null, downAt = null;
+cv.addEventListener('pointerdown', ev => {
+  if (!S.photo) return; cv.setPointerCapture(ev.pointerId);
+  const p = toImg(ev); downAt = p; const hit = 28 * (window.devicePixelRatio || 1) / view.s;
+  drag = null;
+  S.targets.forEach((t, i) => { if (Math.hypot(t.x - p.x, t.y - p.y) < hit) drag = { kind: 't', i }; });
+  S.line.forEach((t, i) => { if (Math.hypot(t.x - p.x, t.y - p.y) < hit) drag = { kind: 'l', i }; });
+});
+cv.addEventListener('pointermove', ev => {
+  if (!drag) return; const p = toImg(ev);
+  const o = drag.kind === 't' ? S.targets[drag.i] : S.line[drag.i]; o.x = p.x; o.y = p.y; drag.moved = true; draw();
+});
+cv.addEventListener('pointerup', ev => {
+  if (!S.photo) return; const p = toImg(ev);
+  if (drag) { if (drag.moved) save(); drag = null; return; }
+  if (p.x < 0 || p.y < 0 || p.x > S.photo.w || p.y > S.photo.h) return;
+  if (mode === 'line') {
+    if (S.line.length >= 2) S.line = [];
+    S.line.push(p);
+    if (S.line.length === 2) { setMode('mark'); if (!(S.settings.lineYds > 0)) openSettings(true); }
+  } else {
+    S.targets.push({ x: p.x, y: p.y, at: new Date().toISOString(), truth: null });
+    if (navigator.vibrate) navigator.vibrate(40);
+  }
+  save(); draw();
+});
+function setMode(m) { mode = m; $('btnMark').classList.toggle('on', m === 'mark'); $('btnLine').classList.toggle('on', m === 'line'); }
+$('btnMark').onclick = () => setMode('mark');
+$('btnLine').onclick = () => { setMode('line'); S.line = []; save(); draw(); };
+$('btnUndo').onclick = () => { if (mode === 'line' && S.line.length) S.line.pop(); else S.targets.pop(); save(); draw(); };
+
+// ---------- sheets ----------
+function closeSheet() { $('sheet').classList.remove('show'); draw(); }
+$('sheet').addEventListener('click', e => { if (e.target.id === 'sheet') closeSheet(); });
+function openSettings(lineFocus) {
+  $('sheetBody').innerHTML = `<h2>Settings</h2>
+    <label>Distance to the guns' line, straight ahead (yards)</label><input id="sLine" type="number" inputmode="decimal" value="${S.settings.lineYds ?? ''}" placeholder="e.g. 30 on Double Strip, 110 on Farm">
+    <label>Phone height above the ground when you took the photo (metres)</label><input id="sH" type="number" inputmode="decimal" step="0.1" value="${S.settings.height}">
+    <label>Camera field of view across the photo (degrees)</label><input id="sF" type="number" inputmode="decimal" step="1" value="${S.settings.fov}">
+    <p class="note">Field of view is a guess at first. After you have walked to a few marks, change it and watch the bearing errors in Results: the value where they are smallest is right for your phone.</p>
+    <div class="row"><button id="sSave" class="primary">Save</button><button id="sCancel">Cancel</button></div>`;
+  $('sheet').classList.add('show');
+  if (lineFocus) setTimeout(() => $('sLine').focus(), 50);
+  $('sCancel').onclick = closeSheet;
+  $('sSave').onclick = () => {
+    const l = parseFloat($('sLine').value), h = parseFloat($('sH').value), f = parseFloat($('sF').value);
+    S.settings.lineYds = l > 0 ? l : null; if (h > 0) S.settings.height = h; if (f > 10 && f < 150) S.settings.fov = f;
+    save(); closeSheet();
+  };
+}
+$('btnSettings').onclick = () => openSettings(false);
+
+function results() {
+  const p = S.photo; if (!p) return [];
+  return S.targets.map((t, i) => {
+    const e = estimate(t); const r = { n: i + 1, estBearing: e.bearing, sensorYds: e.sensorDist / YD, lineYds: e.lineDist == null ? null : e.lineDist / YD };
+    if (t.truth) {
+      const tr = rel(p, t.truth); r.trueBearing = tr.bearing; r.trueYds = tr.dist / YD; r.gpsAcc = t.truth.acc;
+      r.bearingErr = angDiff(e.bearing, tr.bearing);
+      r.sideYds = tr.dist * Math.sin(r.bearingErr * D) / YD;
+      if (isFinite(e.best)) { const ex = e.best * Math.sin(e.bearing * D), ey = e.best * Math.cos(e.bearing * D); r.missYds = Math.hypot(ex - tr.x, ey - tr.y) / YD; }
+    }
+    return r;
+  });
+}
+function openResults() {
+  const rs = results();
+  const rows = rs.map(r => `<tr><td>${r.n}</td><td>${f0(r.estBearing)}°</td><td>${r.trueBearing == null ? '–' : f0(r.trueBearing) + '°'}</td><td>${r.bearingErr == null ? '–' : f1(r.bearingErr) + '°'}</td>
+    <td>${f0(r.sensorYds)}</td><td>${r.lineYds == null ? '–' : f0(r.lineYds)}</td><td>${r.trueYds == null ? '–' : f0(r.trueYds)}</td><td><b>${r.missYds == null ? '–' : f0(r.missYds)}</b></td>
+    <td><button data-here="${r.n - 1}" style="min-height:40px;padding:4px 10px">${S.targets[r.n - 1].truth ? 'Redo' : "I'm here"}</button></td></tr>`).join('');
+  $('sheetBody').innerHTML = `<h2>Results</h2>
+    <p class="note" style="margin:0 0 8px">Walk to a mark, stand on the spot, press "I'm here" and keep still for 5 seconds. Distances in yards.</p>
+    <table><thead><tr><th>#</th><th>Est. bearing</th><th>True</th><th>Error</th><th>Est. yd (level)</th><th>Est. yd (guns' line)</th><th>True yd</th><th>Miss yd</th><th></th></tr></thead><tbody>${rows || '<tr><td colspan="9">No marks yet.</td></tr>'}</tbody></table>
+    <p id="hereMsg" class="note"></p>
+    <div class="row"><button id="rCopy">Copy results</button><button id="rJson">Download data</button><button id="rClose" class="primary">Close</button></div>`;
+  $('sheet').classList.add('show');
+  $('rClose').onclick = closeSheet;
+  $('rCopy').onclick = async () => {
+    const head = 'mark,est_bearing,true_bearing,bearing_err,est_yd_level,est_yd_line,true_yd,miss_yd,gps_acc_m';
+    const csv = [head, ...results().map(r => [r.n, f0(r.estBearing), f0(r.trueBearing), f1(r.bearingErr), f0(r.sensorYds), f0(r.lineYds), f0(r.trueYds), f0(r.missYds), f0(r.gpsAcc)].join(','))].join('\n');
+    const meta = `photo ${S.photo.time} heading ${f1(S.photo.heading)} pitch ${f1(S.photo.pitch)} roll ${f1(S.photo.roll)} gps±${f0(S.photo.acc)}m fov ${S.settings.fov} height ${S.settings.height}m line ${S.settings.lineYds ?? '-'}yd compass ${S.photo.compass}`;
+    try { await navigator.clipboard.writeText(meta + '\n' + csv); $('hereMsg').textContent = 'Copied.'; } catch (e) { $('hereMsg').textContent = 'Copy failed: ' + e.message; }
+  };
+  $('rJson').onclick = () => {
+    const blob = new Blob([JSON.stringify({ ...S, results: results() }, null, 1)], { type: 'application/json' });
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'picking-up-test-' + (S.photo?.time || 'data').replace(/[:.]/g, '-') + '.json'; a.click();
+  };
+  for (const b of document.querySelectorAll('[data-here]')) b.onclick = () => imHere(+b.dataset.here, b);
+}
+function imHere(i, btn) {
+  if (!gps.last) { $('hereMsg').textContent = 'No GPS yet.'; return; }
+  const start = Date.now(); btn.disabled = true;
+  const tick = setInterval(() => {
+    const left = 5 - Math.floor((Date.now() - start) / 1000);
+    btn.textContent = left > 0 ? `Hold still ${left}` : 'Saving';
+    if (left <= 0) {
+      clearInterval(tick);
+      const f = meanFix(5000); S.targets[i].truth = { lat: f.lat, lon: f.lon, acc: f.acc, at: new Date().toISOString() };
+      save(); openResults();
+    }
+  }, 250);
+}
+$('btnResults').onclick = openResults;
+
+// restore
+if (S.photo) loadImg();
+</script>
+</body>
+</html>
