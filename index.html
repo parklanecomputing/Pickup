@@ -50,9 +50,12 @@ input{font:inherit;width:100%;padding:8px;border-radius:8px;border:1px solid var
 </section>
 
 <section id="cam" class="screen">
-  <div class="stage"><video id="video" playsinline muted autoplay></video></div>
+  <div class="stage"><video id="video" playsinline muted autoplay></video><canvas id="camOv" style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none"></canvas></div>
   <div class="strip">
     <div id="camRead" class="readout"></div>
+    <select id="camSel" style="font:inherit;font-size:13px;padding:6px;border-radius:8px;background:#0e130e;color:var(--fg);border:1px solid var(--edge);max-width:100%"></select>
+    <button id="btnCal">Measure view width</button>
+    <div id="calMsg" class="readout warn"></div>
     <button id="btnShoot" class="primary" style="min-height:72px">Take photo</button>
     <button id="btnBackToPhoto">Back to photo</button>
     <p class="note">Keep the phone level and still for a second before taking the photo.</p>
@@ -66,6 +69,7 @@ input{font:inherit;width:100%;padding:8px;border-radius:8px;border:1px solid var
     <button id="btnMark" class="on">Mark birds</button>
     <button id="btnLine">Draw guns' line</button>
     <button id="btnUndo">Undo</button>
+    <button id="btnZoom">Pinch to zoom</button>
     <button id="btnResults" class="primary">Results / I'm here</button>
     <button id="btnSettings">Settings</button>
     <button id="btnNew">New photo</button>
@@ -86,7 +90,7 @@ const f0 = v => (v == null || !isFinite(v)) ? '–' : Math.round(v).toString();
 
 // ---------- state ----------
 const KEY = 'pickup-photo-test-v1';
-let S = { settings: { fov: 70, height: 1.5, lineYds: null }, photo: null, line: [], targets: [] };
+let S = { settings: { fov: 70, height: 1.3, lineYds: null }, photo: null, line: [], targets: [] };
 try { const raw = localStorage.getItem(KEY); if (raw) S = Object.assign(S, JSON.parse(raw)); } catch (e) {}
 function save() { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) {} }
 let mode = 'mark';
@@ -159,10 +163,54 @@ function rel(a, b) {
 
 // ---------- camera ----------
 let stream = null;
+let camId = null; try { camId = localStorage.getItem(KEY + '-cam'); } catch (e) {}
+S.settings.fovByCam = S.settings.fovByCam || {};
 async function startCamera() {
   if (stream) return;
-  stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } } });
+  const v = { width: { ideal: 4032 }, height: { ideal: 3024 }, aspectRatio: { ideal: 4 / 3 } };
+  if (camId) v.deviceId = { exact: camId }; else v.facingMode = { ideal: 'environment' };
+  try { stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: v }); }
+  catch (e) { if (camId) { camId = null; return startCamera(); } throw e; }
+  const tr = stream.getVideoTracks()[0];
+  // Widest zoom the camera allows (some phones expose the ultra-wide this way).
+  try { const caps = tr.getCapabilities ? tr.getCapabilities() : null; if (caps && caps.zoom) await tr.applyConstraints({ advanced: [{ zoom: caps.zoom.min }] }); } catch (e) {}
+  camId = (tr.getSettings && tr.getSettings().deviceId) || camId;
+  if (S.settings.fovByCam[camId]) S.settings.fov = S.settings.fovByCam[camId];
   $('video').srcObject = stream;
+  fillCams();
+}
+async function fillCams() {
+  try {
+    const ds = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'videoinput');
+    $('camSel').innerHTML = ds.map((d, i) => `<option value="${d.deviceId}" ${d.deviceId === camId ? 'selected' : ''}>${(d.label || 'Camera ' + (i + 1)).replace(/</g, '')}</option>`).join('');
+  } catch (e) {}
+}
+$('camSel').onchange = async () => {
+  camId = $('camSel').value; try { localStorage.setItem(KEY + '-cam', camId); } catch (e) {}
+  stopCamera(); try { await startCamera(); } catch (e) { alert('Camera error: ' + e.message); }
+};
+// Measure the camera's view width: centre a distant object, then turn until it sits on the left edge line.
+let cal = null;
+$('btnCal').onclick = () => {
+  const o = steadyOrientation(); if (!o) return;
+  if (!cal) { cal = { h1: o.heading }; $('btnCal').textContent = 'It is on the edge line'; $('calMsg').textContent = 'Now turn left slowly until that object sits on the left edge line, keep level, then press again.'; return; }
+  const half = Math.abs(angDiff(o.heading, cal.h1)); cal = null; $('btnCal').textContent = 'Measure view width';
+  if (half < 10 || half > 75) { $('calMsg').textContent = 'That gave ' + f0(half * 2) + '°, which looks wrong. Try again.'; return; }
+  S.settings.fov = Math.round(half * 2); S.settings.fovByCam[camId] = S.settings.fov; save();
+  $('calMsg').textContent = 'View width set to ' + S.settings.fov + '° for this camera.';
+};
+function videoBox() {
+  const v = $('video'), r = v.getBoundingClientRect(); if (!v.videoWidth) return null;
+  const k = Math.min(r.width / v.videoWidth, r.height / v.videoHeight), w = v.videoWidth * k, h = v.videoHeight * k;
+  return { x: (r.width - w) / 2, y: (r.height - h) / 2, w, h, cw: r.width, ch: r.height };
+}
+function drawCamOverlay() {
+  const c = $('camOv'), b = videoBox(); if (!b) return; const dpr = window.devicePixelRatio || 1;
+  c.width = Math.round(b.cw * dpr); c.height = Math.round(b.ch * dpr); const g = c.getContext('2d'); g.scale(dpr, dpr);
+  g.strokeStyle = 'rgba(255,255,255,.8)'; g.lineWidth = 1.5;
+  const cx = b.x + b.w / 2, cy = b.y + b.h / 2;
+  g.beginPath(); g.moveTo(cx - 18, cy); g.lineTo(cx + 18, cy); g.moveTo(cx, cy - 18); g.lineTo(cx, cy + 18); g.stroke();
+  if (cal) { g.strokeStyle = '#e8b23a'; g.lineWidth = 3; g.beginPath(); g.moveTo(b.x + 2, b.y); g.lineTo(b.x + 2, b.y + b.h); g.stroke(); }
 }
 function stopCamera() { if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; } }
 
@@ -177,7 +225,7 @@ $('btnStart').onclick = async () => {
   $('startMsg').textContent = '';
   try {
     if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
-      const r = await DeviceOrientationEvent.requestPermission(); if (r !== 'granted') throw new Error('Motion permission was refused');
+      try { const r = await DeviceOrientationEvent.requestPermission(); if (r !== 'granted') $('startMsg').textContent = 'Motion permission was refused; the compass may not work.'; } catch (e) {}
     }
     startGps(); keepAwake();
     try { await document.documentElement.requestFullscreen(); await screen.orientation.lock('landscape'); } catch (e) {}
@@ -200,7 +248,9 @@ setInterval(() => {
   lines.push('Wobble ±' + (o ? f1(o.spread) + '°' : '–'));
   lines.push('GPS ' + (g ? '±' + f0(g.acc) + ' m' : (gps.err || 'waiting')));
   lines.push('Compass: ' + sens.src);
+  lines.push('View width ' + S.settings.fov + '°' + (S.settings.fovByCam[camId] ? '' : ' (guess)'));
   $('camRead').textContent = lines.join('\n');
+  drawCamOverlay();
   $('btnBackToPhoto').disabled = !S.photo;
   $('btnShoot').disabled = !o || !g;
 }, 250);
@@ -208,12 +258,12 @@ setInterval(() => {
 $('btnShoot').onclick = () => {
   const v = $('video'); const o = steadyOrientation(); const fix = meanFix(10000);
   if (!v.videoWidth || !o || !fix) return;
-  const maxW = 1600, k = Math.min(1, maxW / v.videoWidth);
+  const maxW = 4096, k = Math.min(1, maxW / v.videoWidth);
   const c = document.createElement('canvas'); c.width = Math.round(v.videoWidth * k); c.height = Math.round(v.videoHeight * k);
   c.getContext('2d').drawImage(v, 0, 0, c.width, c.height);
   S.photo = { dataUrl: c.toDataURL('image/jpeg', 0.82), w: c.width, h: c.height, lat: fix.lat, lon: fix.lon, acc: fix.acc,
-    heading: o.heading, pitch: o.pitch, roll: o.roll, wobble: o.spread, compass: sens.src, time: new Date().toISOString() };
-  S.line = []; S.targets = []; save(); stopCamera(); loadImg(); setMode('line'); show('photo');
+    heading: o.heading, pitch: o.pitch, roll: o.roll, wobble: o.spread, compass: sens.src, cam: camId, time: new Date().toISOString() };
+  S.line = []; S.targets = []; S.settings.lineYds = null; Z = { k: 1, tx: 0, ty: 0 }; save(); stopCamera(); loadImg(); setMode('line'); show('photo');
 };
 
 // ---------- geometry ----------
@@ -243,7 +293,7 @@ function estimate(t) {
 function horizonY() { return S.photo.h / 2 + focalPx() * Math.tan(S.photo.pitch * D); }
 
 // ---------- photo canvas ----------
-const cv = $('cv'), ctx = cv.getContext('2d'); let img = null, view = { s: 1, ox: 0, oy: 0 };
+const cv = $('cv'), ctx = cv.getContext('2d'); let img = null, view = { s: 1, ox: 0, oy: 0 }, Z = { k: 1, tx: 0, ty: 0 }, base = { s: 1, ox: 0, oy: 0 };
 function loadImg() { if (!S.photo) return; img = new Image(); img.onload = draw; img.src = S.photo.dataUrl; }
 function draw() {
   const r = cv.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
@@ -251,8 +301,10 @@ function draw() {
   ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.fillStyle = '#000'; ctx.fillRect(0, 0, cv.width, cv.height);
   updateStrip();
   if (!S.photo || !img || !img.complete) return;
-  const s = Math.min(cv.width / S.photo.w, cv.height / S.photo.h);
-  view = { s, ox: (cv.width - S.photo.w * s) / 2, oy: (cv.height - S.photo.h * s) / 2, dpr };
+  const s0 = Math.min(cv.width / S.photo.w, cv.height / S.photo.h);
+  base = { s: s0, ox: (cv.width - S.photo.w * s0) / 2, oy: (cv.height - S.photo.h * s0) / 2 };
+  const s = s0 * Z.k;
+  view = { s, ox: base.ox * Z.k + Z.tx, oy: base.oy * Z.k + Z.ty, dpr };
   ctx.drawImage(img, view.ox, view.oy, S.photo.w * s, S.photo.h * s);
   ctx.setTransform(s, 0, 0, s, view.ox, view.oy);
   const lw = 2 * dpr / s;
@@ -277,6 +329,8 @@ function draw() {
 }
 function updateStrip() {
   $('count').textContent = `${S.targets.length} marked`;
+  $('btnZoom').textContent = Z.k > 1.01 ? `Zoom out (${Z.k.toFixed(1)}x)` : 'Pinch to zoom';
+  $('btnZoom').disabled = Z.k <= 1.01;
   const p = S.photo; if (!p) { $('photoRead').textContent = ''; return; }
   const warn = [];
   if (Math.abs(p.roll) > 4) warn.push('Phone was tilted ' + f1(p.roll) + '° sideways; distances less reliable.');
@@ -291,20 +345,59 @@ function toImg(ev) {
   return { x: ((ev.clientX - r.left) * dpr - view.ox) / view.s, y: ((ev.clientY - r.top) * dpr - view.oy) / view.s };
 }
 let drag = null, downAt = null;
+const ptrs = new Map(); let pinch = null, pan = null, gestured = false;
+function canvasPt(ev) { const r = cv.getBoundingClientRect(), dpr = window.devicePixelRatio || 1; return { x: (ev.clientX - r.left) * dpr, y: (ev.clientY - r.top) * dpr }; }
+function setZoom(k, screenPt, worldPt) {
+  k = Math.max(1, Math.min(8, k));
+  const s = base.s * k;
+  Z.k = k; Z.tx = screenPt.x - worldPt.x * s - base.ox * k; Z.ty = screenPt.y - worldPt.y * s - base.oy * k;
+  if (k === 1) { Z.tx = 0; Z.ty = 0; }
+  draw();
+}
+function resetZoom() { Z = { k: 1, tx: 0, ty: 0 }; draw(); }
 cv.addEventListener('pointerdown', ev => {
   if (!S.photo) return; cv.setPointerCapture(ev.pointerId);
+  ptrs.set(ev.pointerId, canvasPt(ev));
+  if (ptrs.size === 2) {
+    const [a, b] = [...ptrs.values()]; const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+    pinch = { d0: Math.hypot(a.x - b.x, a.y - b.y), k0: Z.k, world: { x: (mid.x - view.ox) / view.s, y: (mid.y - view.oy) / view.s } };
+    drag = null; pan = null; gestured = true; return;
+  }
+  if (ptrs.size > 2) return;
+  gestured = false;
   const p = toImg(ev); downAt = p; const hit = 28 * (window.devicePixelRatio || 1) / view.s;
   drag = null;
   S.targets.forEach((t, i) => { if (Math.hypot(t.x - p.x, t.y - p.y) < hit) drag = { kind: 't', i }; });
   S.line.forEach((t, i) => { if (Math.hypot(t.x - p.x, t.y - p.y) < hit) drag = { kind: 'l', i }; });
+  if (!drag) { const c = canvasPt(ev); pan = { x: c.x, y: c.y, tx: Z.tx, ty: Z.ty }; }
 });
 cv.addEventListener('pointermove', ev => {
-  if (!drag) return; const p = toImg(ev);
-  const o = drag.kind === 't' ? S.targets[drag.i] : S.line[drag.i]; o.x = p.x; o.y = p.y; drag.moved = true; draw();
+  if (!ptrs.has(ev.pointerId)) return;
+  ptrs.set(ev.pointerId, canvasPt(ev));
+  if (pinch && ptrs.size >= 2) {
+    const [a, b] = [...ptrs.values()]; const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+    setZoom(pinch.k0 * Math.hypot(a.x - b.x, a.y - b.y) / pinch.d0, mid, pinch.world); return;
+  }
+  if (drag) { const p = toImg(ev); const o = drag.kind === 't' ? S.targets[drag.i] : S.line[drag.i]; o.x = p.x; o.y = p.y; drag.moved = true; draw(); return; }
+  if (pan) {
+    const c = canvasPt(ev), dx = c.x - pan.x, dy = c.y - pan.y;
+    if (Math.hypot(dx, dy) > 12 * (window.devicePixelRatio || 1)) gestured = true;
+    if (gestured && Z.k > 1.01) { Z.tx = pan.tx + dx; Z.ty = pan.ty + dy; draw(); }
+  }
 });
+function endPtr(ev) {
+  const had = ptrs.delete(ev.pointerId);
+  if (ptrs.size < 2) pinch = null;
+  return had;
+}
+cv.addEventListener('pointercancel', ev => { endPtr(ev); drag = null; pan = null; });
 cv.addEventListener('pointerup', ev => {
-  if (!S.photo) return; const p = toImg(ev);
+  if (!endPtr(ev) || !S.photo) return;
+  if (ptrs.size > 0) return;            // still a finger down after a pinch
+  const p = toImg(ev);
   if (drag) { if (drag.moved) save(); drag = null; return; }
+  pan = null;
+  if (gestured) { gestured = false; return; }
   if (p.x < 0 || p.y < 0 || p.x > S.photo.w || p.y > S.photo.h) return;
   if (mode === 'line') {
     if (S.line.length >= 2) S.line = [];
@@ -318,6 +411,7 @@ cv.addEventListener('pointerup', ev => {
 });
 function setMode(m) { mode = m; $('btnMark').classList.toggle('on', m === 'mark'); $('btnLine').classList.toggle('on', m === 'line'); }
 $('btnMark').onclick = () => setMode('mark');
+$('btnZoom').onclick = resetZoom;
 $('btnLine').onclick = () => { setMode('line'); S.line = []; save(); draw(); };
 $('btnUndo').onclick = () => { if (mode === 'line' && S.line.length) S.line.pop(); else S.targets.pop(); save(); draw(); };
 
@@ -336,7 +430,7 @@ function openSettings(lineFocus) {
   $('sCancel').onclick = closeSheet;
   $('sSave').onclick = () => {
     const l = parseFloat($('sLine').value), h = parseFloat($('sH').value), f = parseFloat($('sF').value);
-    S.settings.lineYds = l > 0 ? l : null; if (h > 0) S.settings.height = h; if (f > 10 && f < 150) S.settings.fov = f;
+    S.settings.lineYds = l > 0 ? l : null; if (h > 0) S.settings.height = h; if (f > 10 && f < 150) { S.settings.fov = f; const cid = (S.photo && S.photo.cam) || camId; if (cid) S.settings.fovByCam[cid] = f; }
     save(); closeSheet();
   };
 }
@@ -352,6 +446,7 @@ function results() {
       r.sideYds = tr.dist * Math.sin(r.bearingErr * D) / YD;
       if (isFinite(e.best)) { const ex = e.best * Math.sin(e.bearing * D), ey = e.best * Math.cos(e.bearing * D); r.missYds = Math.hypot(ex - tr.x, ey - tr.y) / YD; }
     }
+    if (t.paced > 0) { r.pacedYds = t.paced; if (isFinite(e.best)) r.distErrYds = e.best / YD - t.paced; }
     return r;
   });
 }
@@ -359,17 +454,18 @@ function openResults() {
   const rs = results();
   const rows = rs.map(r => `<tr><td>${r.n}</td><td>${f0(r.estBearing)}°</td><td>${r.trueBearing == null ? '–' : f0(r.trueBearing) + '°'}</td><td>${r.bearingErr == null ? '–' : f1(r.bearingErr) + '°'}</td>
     <td>${f0(r.sensorYds)}</td><td>${r.lineYds == null ? '–' : f0(r.lineYds)}</td><td>${r.trueYds == null ? '–' : f0(r.trueYds)}</td><td><b>${r.missYds == null ? '–' : f0(r.missYds)}</b></td>
+    <td><input data-paced="${r.n - 1}" type="number" inputmode="decimal" value="${r.pacedYds ?? ''}" style="width:64px;padding:4px"></td><td><b>${r.distErrYds == null ? '–' : (r.distErrYds > 0 ? '+' : '') + f0(r.distErrYds)}</b></td>
     <td><button data-here="${r.n - 1}" style="min-height:40px;padding:4px 10px">${S.targets[r.n - 1].truth ? 'Redo' : "I'm here"}</button></td></tr>`).join('');
   $('sheetBody').innerHTML = `<h2>Results</h2>
-    <p class="note" style="margin:0 0 8px">Walk to a mark, stand on the spot, press "I'm here" and keep still for 5 seconds. Distances in yards.</p>
-    <table><thead><tr><th>#</th><th>Est. bearing</th><th>True</th><th>Error</th><th>Est. yd (level)</th><th>Est. yd (guns' line)</th><th>True yd</th><th>Miss yd</th><th></th></tr></thead><tbody>${rows || '<tr><td colspan="9">No marks yet.</td></tr>'}</tbody></table>
+    <p class="note" style="margin:0 0 8px">Distances in yards. Best check: pace or measure each mark and type it under "Paced yd". GPS ("I'm here") is only useful for marks over about 30 yds away, because its error is about 5 yds.</p>
+    <table><thead><tr><th>#</th><th>Est. bearing</th><th>True</th><th>Error</th><th>Est. yd (level)</th><th>Est. yd (guns' line)</th><th>True yd</th><th>Miss yd</th><th>Paced yd</th><th>Dist. err yd</th><th></th></tr></thead><tbody>${rows || '<tr><td colspan="9">No marks yet.</td></tr>'}</tbody></table>
     <p id="hereMsg" class="note"></p>
     <div class="row"><button id="rCopy">Copy results</button><button id="rJson">Download data</button><button id="rClose" class="primary">Close</button></div>`;
   $('sheet').classList.add('show');
   $('rClose').onclick = closeSheet;
   $('rCopy').onclick = async () => {
-    const head = 'mark,est_bearing,true_bearing,bearing_err,est_yd_level,est_yd_line,true_yd,miss_yd,gps_acc_m';
-    const csv = [head, ...results().map(r => [r.n, f0(r.estBearing), f0(r.trueBearing), f1(r.bearingErr), f0(r.sensorYds), f0(r.lineYds), f0(r.trueYds), f0(r.missYds), f0(r.gpsAcc)].join(','))].join('\n');
+    const head = 'mark,est_bearing,true_bearing,bearing_err,est_yd_level,est_yd_line,true_yd,miss_yd,gps_acc_m,paced_yd,dist_err_yd';
+    const csv = [head, ...results().map(r => [r.n, f0(r.estBearing), f0(r.trueBearing), f1(r.bearingErr), f0(r.sensorYds), f0(r.lineYds), f0(r.trueYds), f0(r.missYds), f0(r.gpsAcc), f0(r.pacedYds), f0(r.distErrYds)].join(','))].join('\n');
     const meta = `photo ${S.photo.time} heading ${f1(S.photo.heading)} pitch ${f1(S.photo.pitch)} roll ${f1(S.photo.roll)} gps±${f0(S.photo.acc)}m fov ${S.settings.fov} height ${S.settings.height}m line ${S.settings.lineYds ?? '-'}yd compass ${S.photo.compass}`;
     try { await navigator.clipboard.writeText(meta + '\n' + csv); $('hereMsg').textContent = 'Copied.'; } catch (e) { $('hereMsg').textContent = 'Copy failed: ' + e.message; }
   };
@@ -378,6 +474,7 @@ function openResults() {
     const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'picking-up-test-' + (S.photo?.time || 'data').replace(/[:.]/g, '-') + '.json'; a.click();
   };
   for (const b of document.querySelectorAll('[data-here]')) b.onclick = () => imHere(+b.dataset.here, b);
+  for (const inp of document.querySelectorAll('[data-paced]')) inp.onchange = () => { const v = parseFloat(inp.value); S.targets[+inp.dataset.paced].paced = v > 0 ? v : null; save(); openResults(); };
 }
 function imHere(i, btn) {
   if (!gps.last) { $('hereMsg').textContent = 'No GPS yet.'; return; }

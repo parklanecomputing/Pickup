@@ -13,6 +13,12 @@ The camera, GPS and compass only work over HTTPS, so host it on GitHub Pages:
 3. After a minute, open `https://<your-github-username>.github.io/Pickup/` in Chrome on the Galaxy S26.
 4. Optional: Chrome menu, then "Add to Home screen", so it opens full screen.
 
+## Camera and view width
+
+The camera screen has a list of your phone's cameras. If your phone lists an ultra-wide camera there, pick it to see more of the drive. The page also asks for the camera's widest zoom.
+
+Each camera needs its view width measured once. Press **Measure view width**, put the crosshair on a distant post, press again, then turn slowly right until the post sits on the amber line at the left edge and press once more. The value is saved for that camera.
+
 ## Run the test
 
 Do this on Double Strip (about 30 yds to the line) and on Farm (100 to 120 yds) if you can, or anywhere with a few gates, trees or posts at known spots.
@@ -20,9 +26,9 @@ Do this on Double Strip (about 30 yds to the line) and on Farm (100 to 120 yds) 
 1. Press **Start** and allow camera, location and motion.
 2. Hold the phone in landscape, level and still, at your normal height. Wait for GPS to settle (under about ±5 m) and press **Take photo**.
 3. Tap two points on the guns' line (or a fence or hedge you know the distance to). Enter its distance in yards when asked.
-4. Tap three to six things you can see at different distances and directions. Each tap shows its estimated distance. You can drag a mark to adjust it.
-5. Walk to each one. Open **Results**, press **I'm here** for that mark and stand still for 5 seconds.
-6. Read the table. "Miss yd" is how far the estimate was from where you actually stood. **Copy results** puts it on the clipboard so you can paste it back to me.
+4. Tap three to six things you can see at different distances and directions. Each tap shows its estimated distance. You can drag a mark to adjust it. Pinch with two fingers to zoom in on far ground and drag with one finger to move around; a single tap still places a mark. **Zoom out** returns to the whole photo.
+5. Pace or measure the distance to each one and type it under **Paced yd** in **Results**. This is the most reliable check. For marks more than about 30 yds away you can also walk there and press **I'm here** (stand still for 5 seconds) to check the bearing with GPS. Closer than that, GPS error of about 5 yds swamps the result.
+6. Read the table. "Dist. err yd" is how far the estimated distance was from your paced distance. "Miss yd" is how far the estimate was from where GPS put you. **Copy results** puts it on the clipboard so you can paste it back to me.
 
 ## What to look for
 
