@@ -17,7 +17,7 @@ The camera, GPS and compass only work over HTTPS, so host it on GitHub Pages:
 
 The camera screen has a list of your phone's cameras. If your phone lists an ultra-wide camera there, pick it to see more of the drive. The page also asks for the camera's widest zoom.
 
-Each camera needs its view width measured once. Press **Measure view width**, put the crosshair on a distant post, press again, then turn slowly right until the post sits on the amber line at the left edge and press once more. The value is saved for that camera.
+Each camera needs its view width measured once. Take a photo, put two or three marks at least 30 yds away (one well left of centre, one well right), press **I'm here** at each, then press **Fit view width** in **Results**. The value is saved for that camera. Rough starting points: about 72° for the main camera and about 110° for an ultra-wide.
 
 ## Run the test
 

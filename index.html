@@ -54,7 +54,7 @@ input{font:inherit;width:100%;padding:8px;border-radius:8px;border:1px solid var
   <div class="strip">
     <div id="camRead" class="readout"></div>
     <select id="camSel" style="font:inherit;font-size:13px;padding:6px;border-radius:8px;background:#0e130e;color:var(--fg);border:1px solid var(--edge);max-width:100%"></select>
-    <button id="btnCal">Measure view width</button>
+    <button id="btnCal" style="display:none">Measure view width</button>
     <div id="calMsg" class="readout warn"></div>
     <button id="btnShoot" class="primary" style="min-height:72px">Take photo</button>
     <button id="btnBackToPhoto">Back to photo</button>
@@ -193,7 +193,8 @@ $('camSel').onchange = async () => {
 let cal = null;
 $('btnCal').onclick = () => {
   const o = steadyOrientation(); if (!o) return;
-  if (!cal) { cal = { h1: o.heading }; $('btnCal').textContent = 'It is on the edge line'; $('calMsg').textContent = 'Now turn left slowly until that object sits on the left edge line, keep level, then press again.'; return; }
+  if (!cal) { cal = { step: 1 }; $('btnCal').textContent = 'Crosshair is on it'; $('calMsg').textContent = 'Hold the phone level and put the crosshair on a distant post or tree, then press.'; return; }
+  if (cal.step === 1) { cal = { step: 2, h1: o.heading }; $('btnCal').textContent = 'It is on the edge line'; $('calMsg').textContent = 'Now turn slowly to your right until that object sits on the amber line at the left edge, then press.'; return; }
   const half = Math.abs(angDiff(o.heading, cal.h1)); cal = null; $('btnCal').textContent = 'Measure view width';
   if (half < 10 || half > 75) { $('calMsg').textContent = 'That gave ' + f0(half * 2) + '°, which looks wrong. Try again.'; return; }
   S.settings.fov = Math.round(half * 2); S.settings.fovByCam[camId] = S.settings.fov; save();
@@ -210,7 +211,7 @@ function drawCamOverlay() {
   g.strokeStyle = 'rgba(255,255,255,.8)'; g.lineWidth = 1.5;
   const cx = b.x + b.w / 2, cy = b.y + b.h / 2;
   g.beginPath(); g.moveTo(cx - 18, cy); g.lineTo(cx + 18, cy); g.moveTo(cx, cy - 18); g.lineTo(cx, cy + 18); g.stroke();
-  if (cal) { g.strokeStyle = '#e8b23a'; g.lineWidth = 3; g.beginPath(); g.moveTo(b.x + 2, b.y); g.lineTo(b.x + 2, b.y + b.h); g.stroke(); }
+  if (cal && cal.step === 2) { g.strokeStyle = '#e8b23a'; g.lineWidth = 3; g.beginPath(); g.moveTo(b.x + 2, b.y); g.lineTo(b.x + 2, b.y + b.h); g.stroke(); }
 }
 function stopCamera() { if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; } }
 
@@ -460,9 +461,10 @@ function openResults() {
     <p class="note" style="margin:0 0 8px">Distances in yards. Best check: pace or measure each mark and type it under "Paced yd". GPS ("I'm here") is only useful for marks over about 30 yds away, because its error is about 5 yds.</p>
     <table><thead><tr><th>#</th><th>Est. bearing</th><th>True</th><th>Error</th><th>Est. yd (level)</th><th>Est. yd (guns' line)</th><th>True yd</th><th>Miss yd</th><th>Paced yd</th><th>Dist. err yd</th><th></th></tr></thead><tbody>${rows || '<tr><td colspan="9">No marks yet.</td></tr>'}</tbody></table>
     <p id="hereMsg" class="note"></p>
-    <div class="row"><button id="rCopy">Copy results</button><button id="rJson">Download data</button><button id="rClose" class="primary">Close</button></div>`;
+    <div class="row"><button id="rFit">Fit view width</button><button id="rCopy">Copy results</button><button id="rJson">Download data</button><button id="rClose" class="primary">Close</button></div>`;
   $('sheet').classList.add('show');
   $('rClose').onclick = closeSheet;
+  $('rFit').onclick = fitFov;
   $('rCopy').onclick = async () => {
     const head = 'mark,est_bearing,true_bearing,bearing_err,est_yd_level,est_yd_line,true_yd,miss_yd,gps_acc_m,paced_yd,dist_err_yd';
     const csv = [head, ...results().map(r => [r.n, f0(r.estBearing), f0(r.trueBearing), f1(r.bearingErr), f0(r.sensorYds), f0(r.lineYds), f0(r.trueYds), f0(r.missYds), f0(r.gpsAcc), f0(r.pacedYds), f0(r.distErrYds)].join(','))].join('\n');
@@ -475,6 +477,25 @@ function openResults() {
   };
   for (const b of document.querySelectorAll('[data-here]')) b.onclick = () => imHere(+b.dataset.here, b);
   for (const inp of document.querySelectorAll('[data-paced]')) inp.onchange = () => { const v = parseFloat(inp.value); S.targets[+inp.dataset.paced].paced = v > 0 ? v : null; save(); openResults(); };
+}
+// Find the view width that best matches the GPS bearings of marks 30+ yd away.
+function fitFov() {
+  const p = S.photo, msg = $('hereMsg');
+  const pts = S.targets.filter(t => t.truth).map(t => ({ t, tr: rel(p, t.truth) })).filter(o => o.tr.dist / YD >= 30);
+  const offs = pts.map(o => (o.t.x - p.w / 2) / (p.w / 2));
+  if (pts.length < 2 || Math.max(...offs) - Math.min(...offs) < 0.6) { msg.textContent = 'Needs at least two marks 30+ yds away with "I\'m here", one well left of centre and one well right.'; return; }
+  let best = null;
+  for (let fov = 40; fov <= 130; fov += 0.5) {
+    const f = (p.w / 2) / Math.tan(fov * D / 2);
+    const res = pts.map(o => angDiff(o.tr.bearing, norm(p.heading + Math.atan((o.t.x - p.w / 2) / f) / D)));
+    const off = res.reduce((a, b) => a + b, 0) / res.length;
+    const rms = Math.sqrt(res.reduce((a, r) => a + (r - off) ** 2, 0) / res.length);
+    if (!best || rms < best.rms) best = { fov, off, rms };
+  }
+  const was = S.settings.fov;
+  S.settings.fov = best.fov; const cid = p.cam || camId; if (cid) S.settings.fovByCam[cid] = best.fov; save();
+  openResults();
+  $('hereMsg').textContent = `View width set to ${best.fov}° (was ${was}°). Compass offset about ${f1(best.off)}°, leftover error ±${f1(best.rms)}°.`;
 }
 function imHere(i, btn) {
   if (!gps.last) { $('hereMsg').textContent = 'No GPS yet.'; return; }
